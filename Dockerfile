@@ -32,7 +32,10 @@ RUN cd /tmp && \
     rm -f /usr/bin/clang && \
     rm -f /usr/bin/clang-17 && \ 
     ln -s /usr/bin/clang-21 /usr/bin/clang && \
-    ln -s /usr/bin/llvm-config-21 /usr/bin/llvm-config
+    ln -s /usr/bin/llvm-config-21 /usr/bin/llvm-config && \
+    for t in llvm-nm llvm-ar llvm-ranlib llvm-strip llvm-objcopy llvm-readobj llvm-dwp; do \
+        [ -e /usr/bin/$t ] || ln -s /usr/bin/$t-21 /usr/bin/$t; \
+    done
 
 RUN locale-gen en_US.UTF-8
 ARG USER_UID=1000
@@ -87,7 +90,14 @@ RUN echo "set disassembly-flavor intel" >> ~/.gdbinit
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y --default-toolchain nightly-2024-08-23
 ENV PATH="/home/user/.cargo/bin:${PATH}"
 
-RUN cargo install drcov2lcov bindgen-cli
+# drcov2lcov/bindgen-cli are auxiliary (coverage-report/eval and dev bindings);
+# they are not needed to build the fuzzer runtime or V8. The pinned Rust
+# nightly-2024-08-23 (cargo 1.82) cannot resolve their newest dependency trees,
+# which now require the unstable `edition2024` feature. Install with --locked
+# (uses each crate's published Cargo.lock, i.e. pre-edition2024 deps) and pin
+# versions, falling back gracefully so image builds never break on these tools.
+RUN (cargo install --locked bindgen-cli --version 0.70.1 || cargo install bindgen-cli --version 0.69.5 || true) && \
+    (cargo install --locked drcov2lcov --version 0.2.0 || cargo install drcov2lcov --version 0.2.0 || true)
 RUN cd /tmp && \
     sh -c "$(wget -O- -4 https://raw.githubusercontent.com/deluan/zsh-in-docker/master/zsh-in-docker.sh)" -- \
     -t agnoster
