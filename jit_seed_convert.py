@@ -120,50 +120,63 @@ def insert_injection_point(text, trigger):
     return text[: nl + 1] + "FuzzerInjectionPoint(1);\n" + text[nl + 1:]
 
 
+_OUT_DIR = None  # worker が書き出す先(fork で継承)
+
+
+def _process_one(name):
+    """1本を判定し、使えるなら _OUT_DIR に書き出す。'js'/'wasm'/'rejected'/'noskel' を返す。"""
+    path = os.path.join(_CORPUS_DIR, name)
+    try:
+        text = open(path, errors="ignore").read()
+    except Exception:
+        return "noskel"
+    trigger, kind, fn = find_last_trigger(text)
+    if trigger is None:
+        return "noskel"
+    if kind == "js":
+        ok = stays_optimized_js(path, fn)
+    else:
+        ok = stays_optimized_wasm(text, trigger, fn)
+    if not ok:
+        return "rejected"
+    open(os.path.join(_OUT_DIR, name), "w").write(insert_injection_point(text, trigger))
+    return kind
+
+
+_CORPUS_DIR = None
+
+
 def main():
+    global _CORPUS_DIR, _OUT_DIR
     if len(sys.argv) < 3:
         print("usage: jit_seed_convert.py <lifted_corpus_dir> <out_seed_dir>")
         return 2
-    corpus_dir, out_dir = sys.argv[1], sys.argv[2]
-    os.makedirs(out_dir, exist_ok=True)
+    _CORPUS_DIR, _OUT_DIR = sys.argv[1], sys.argv[2]
+    os.makedirs(_OUT_DIR, exist_ok=True)
+    jobs = int(os.environ.get("JOBS", "16"))
 
-    n = no_skeleton = rejected = 0
-    used_js = used_wasm = 0
-    for name in sorted(os.listdir(corpus_dir)):
-        if not name.endswith(".js"):
-            continue
-        n += 1
-        path = os.path.join(corpus_dir, name)
-        text = open(path, errors="ignore").read()
+    names = [n for n in sorted(os.listdir(_CORPUS_DIR)) if n.endswith(".js")]
+    total = len(names)
+    print("入力=%d 本を %d 並列で判定..." % (total, jobs), flush=True)
 
-        trigger, kind, fn = find_last_trigger(text)
-        if trigger is None:
-            no_skeleton += 1
-            continue
+    from multiprocessing import Pool
+    results = []
+    with Pool(jobs) as pool:
+        for i, r in enumerate(pool.imap_unordered(_process_one, names, chunksize=8)):
+            results.append(r)
+            if (i + 1) % 1000 == 0:
+                print("  進捗 %d/%d" % (i + 1, total), flush=True)
 
-        if kind == "js":
-            ok = stays_optimized_js(path, fn)
-        else:
-            ok = stays_optimized_wasm(text, trigger, fn)
-
-        if not ok:
-            rejected += 1
-            continue
-
-        open(os.path.join(out_dir, name), "w").write(
-            insert_injection_point(text, trigger)
-        )
-        if kind == "js":
-            used_js += 1
-        else:
-            used_wasm += 1
-
+    used_js = results.count("js")
+    used_wasm = results.count("wasm")
+    rejected = results.count("rejected")
+    no_skeleton = results.count("noskel")
     used = used_js + used_wasm
     print(
         "入力=%d  使える(最適化維持+マーカー+出力)=%d (JS=%d wasm=%d)  不採用=%d  骨格なし=%d"
-        % (n, used, used_js, used_wasm, rejected, no_skeleton)
+        % (total, used, used_js, used_wasm, rejected, no_skeleton)
     )
-    print("出力: %s (%d 本)" % (out_dir, used))
+    print("出力: %s (%d 本)" % (_OUT_DIR, used))
     return 0
 
 
